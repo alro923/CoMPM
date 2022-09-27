@@ -18,9 +18,15 @@ from sklearn.metrics import precision_recall_fscore_support
 
 from utils import make_batch_roberta, make_batch_bert, make_batch_gpt
 
-os.environ["WANDB_MODE"] = "offline"
+os.environ["WANDB_MODE"] = "online"
 # wandb sync wandb/dryrun-folder-name
 # wandb sync wandb/offline-run-20220815_034215-2v83ya2p 
+# wandb sync wandb/offline-run-20220819_152325-yox1251g
+# wandb sync wandb/offline-run-20220819_141104-1drifkjs
+
+def save_checkpoint(epoch, model, optimizer, loss, ckpt_file_path):
+    state = {'epoch': epoch, 'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'loss': loss}
+    torch.save(state, ckpt_file_path)
 
 
 def CELoss(pred_outs, labels):
@@ -45,6 +51,8 @@ def main():
     initial = args.initial
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    output_folder = 'CoMPM/MELD_results'
 
     dataType = 'multi'
     if dataset == 'MELD':
@@ -150,7 +158,7 @@ def main():
       "cls" : args.cls
     }
 
-    wandb.init(settings=wandb.Settings(start_method="fork"), id = wandb_id, resume = "allow", project= 'CoMPM', config = config, entity="uhhyunjoo")
+    wandb.init(settings=wandb.Settings(start_method="fork"), id = wandb_id, resume = "allow", project= 'CoMPM_MELD', config = config, entity="uhhyunjoo")
     model = model.to(device)
     wandb.watch(models = model, criterion = CELoss, log = 'all')
     # wandb ####
@@ -194,52 +202,56 @@ def main():
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
-            
+        
+        if epoch == 0:
+                id_folder = output_folder + str(wandb_id) + '/'
+                if not os.path.exists(id_folder):
+                    os.makedirs(id_folder)
+
+        if epoch % 10 == 0:
+            ckpt_file_path = '{}/ckpt_{}.pth.tar'.format(id_folder, str(epoch))
+            save_checkpoint(epoch, model, optimizer, loss_val, ckpt_file_path)
+
         """Dev & Test evaluation"""
         model.eval()
         if dataset == 'dailydialog': # micro & macro
             dev_acc, dev_pred_list, dev_label_list = _CalACC(model, dev_dataloader)
             dev_pre_macro, dev_rec_macro, dev_fbeta_macro, _ = precision_recall_fscore_support(dev_label_list, dev_pred_list, average='macro', zero_division = 0)
             dev_pre_micro, dev_rec_micro, dev_fbeta_micro, _ = precision_recall_fscore_support(dev_label_list, dev_pred_list, labels=[0,1,2,3,5,6], average='micro', zero_division = 0) # neutral x
-            
+            test_acc, test_pred_list, test_label_list = _CalACC(model, test_dataloader)
             dev_fscore = dev_fbeta_macro+dev_fbeta_micro
 
+            test_pre_macro, test_rec_macro, test_fbeta_macro, _ = precision_recall_fscore_support(test_label_list, test_pred_list, average='macro', zero_division = 0)
+            test_pre_micro, test_rec_micro, test_fbeta_micro, _ = precision_recall_fscore_support(test_label_list, test_pred_list, labels=[0,1,2,3,5,6], average='micro', zero_division = 0) # neutral x                
+            
+            wandb.log({'epoch': epoch, 'dev_acc' : dev_acc, 'dev_pre_macro' : dev_pre_macro, 'dev_rec_macro' : dev_rec_macro, 'dev_fbeta_macro' : dev_fbeta_macro,
+                       'dev_pre_micro' : dev_pre_micro, 'dev_rec_micro' : dev_rec_micro, 'dev_fbeta_micro' : dev_fbeta_micro, 'dev_fscore' : dev_fscore,
+                       'test_acc' : test_acc, 'test_pre' : test_pre, 'test_rec' : test_rec})
+                
             """Best Score & Model Save"""
             if dev_fscore > best_dev_fscore_macro + best_dev_fscore_micro:
                 best_dev_fscore_macro = dev_fbeta_macro                
                 best_dev_fscore_micro = dev_fbeta_micro
-                
-                test_acc, test_pred_list, test_label_list = _CalACC(model, test_dataloader)
-                test_pre_macro, test_rec_macro, test_fbeta_macro, _ = precision_recall_fscore_support(test_label_list, test_pred_list, average='macro', zero_division = 0)
-                test_pre_micro, test_rec_micro, test_fbeta_micro, _ = precision_recall_fscore_support(test_label_list, test_pred_list, labels=[0,1,2,3,5,6], average='micro', zero_division = 0) # neutral x                
-                
                 best_epoch = epoch
                 _SaveModel(model, save_path)
+                print('>>>> Saved best model to:', save_path)
         else: # weight
             dev_acc, dev_pred_list, dev_label_list = _CalACC(model, dev_dataloader)
             dev_pre, dev_rec, dev_fbeta, _ = precision_recall_fscore_support(dev_label_list, dev_pred_list, average='weighted', zero_division = 0)
-
+            
+            test_acc, test_pred_list, test_label_list = _CalACC(model, test_dataloader)
+            test_pre, test_rec, test_fbeta, _ = precision_recall_fscore_support(test_label_list, test_pred_list, average='weighted', zero_division = 0)
+            
+            wandb.log({'epoch': epoch, 'dev_acc' : dev_acc, 'dev_pre' : dev_pre, 'dev_rec' : dev_rec, 'dev_fbeta': dev_fbeta,
+                                       'test_acc' : test_acc, 'test_pre' : test_pre, 'test_rec' : test_rec, 'test_fbeta' : test_fbeta})
+            
             """Best Score & Model Save"""
             if dev_fbeta > best_dev_fscore:
-                best_dev_fscore = dev_fbeta
-                
-                test_acc, test_pred_list, test_label_list = _CalACC(model, test_dataloader)
-                test_pre, test_rec, test_fbeta, _ = precision_recall_fscore_support(test_label_list, test_pred_list, average='weighted', zero_division = 0)                
-                
+                best_dev_fscore = dev_fbeta        
                 best_epoch = epoch
                 _SaveModel(model, save_path)
-        
-        if epoch % 5 == 0:
-            logger.info('Epoch: {}'.format(epoch))
-            if dataset == 'dailydialog': # micro & macro
-                logger.info('Devleopment ## accuracy: {}, macro-fscore: {}, micro-fscore: {}'.format(dev_acc, dev_fbeta_macro, dev_fbeta_micro))
-                logger.info('') 
-            else:
-                logger.info('Devleopment ## accuracy: {}, precision: {}, recall: {}, fscore: {}'.format(dev_acc, dev_pre, dev_rec, dev_fbeta))
-                logger.info('')
+                print('>>>> Saved best model to:', save_path)
 
-        # wandb ####
-        wandb.log({'epoch': epoch, 'dev_acc' : dev_acc, 'dev_pre' : dev_pre, 'dev_rec' : dev_rec, 'dev_fbeta': dev_fbeta, 'test_acc' : test_acc, 'test_pre' : test_pre, 'test_rec' : test_rec})
         # wandb ####
         
     if dataset == 'dailydialog': # micro & macro
